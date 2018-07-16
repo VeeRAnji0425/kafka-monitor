@@ -25,14 +25,13 @@ the monitor topic.
 Kafka Monitor requires Gradle 2.0 or higher. Java 7 should be used for
 building in order to support both Java 7 and Java 8 at runtime.
 
-Kafka Monitor supports Apache Kafka 0.8 to 0.10:
+Kafka Monitor supports Apache Kafka 0.8 to 0.11:
 - Use branch 0.8.2.2 to work with Apache Kafka 0.8
 - Use branch 0.9.0.1 to work with Apache Kafka 0.9
-- Use master branch to work with Apache Kafka 0.10.2.1
+- Use branch 0.10.2.1 to work with Apache Kafka 0.10
+- Use branch 0.11.x to work with Apache Kafka 0.11
+- Use master branch to work with Apache Kafka 1.0
 
-Kafka Monitor supports Apache Kafka 0.8 and 0.9. Use branch 0.8.2.2 to monitor Apache
-Kafka cluster 0.8. Use branch 0.9.0.1 to compile with Kafka 0.9. Use master
-branch to compile with Kafka 0.10.
 
 ### Configuration Tips
 
@@ -48,7 +47,7 @@ ConsumeServiceConfig.java.
 
 - You can specify multiple SingleClusterMonitor in the kafka-monitor.properties to
 monitor multiple Kafka clusters in one Kafka Monitor process. As another
-advanced use-cse, you can point ProduceService and ConsumeService to two
+advanced use-case, you can point ProduceService and ConsumeService to two
 different Kafka clusters that are connected by MirrorMaker to monitor their
 end-to-end latency.
 
@@ -78,7 +77,7 @@ $ ./bin/kafka-monitor-start.sh config/kafka-monitor.properties
 ```
 
 ### Run Kafka Monitor with arbitrary producer/consumer configuration (e.g. SASL enabled client)
-Edit `config/kafka-monitor.properties` to specify custom configurations for prodcuer in the key/value map `produce.producer.props` in
+Edit `config/kafka-monitor.properties` to specify custom configurations for producer in the key/value map `produce.producer.props` in
 `config/kafka-monitor.properties`. Similarly specify configurations for
 consumer as well. The documentation for producer and consumer in the key/value maps can be found in the Apache Kafka wiki.
 
@@ -87,6 +86,11 @@ $ ./bin/kafka-monitor-start.sh config/kafka-monitor.properties
 ```
 
 ### Run SingleClusterMonitor app to monitor kafka cluster
+
+Metrics `produce-availability-avg` and `consume-availability-avg` demonstrate
+whether messages can be properly produced to and consumed from this cluster.
+See Service Overview wiki for how these metrics are derived.
+
 ```
 $ ./bin/single-cluster-monitor.sh --topic test --broker-list localhost:9092 --zookeeper localhost:2181
 ```
@@ -94,6 +98,11 @@ $ ./bin/single-cluster-monitor.sh --topic test --broker-list localhost:9092 --zo
 ### Run MultiClusterMonitor app to monitor a pipeline of Kafka clusters connected by MirrorMaker
 Edit `config/multi-cluster-monitor.properties` to specify the right broker and
 zookeeper url as suggested by the comment in the properties file
+
+Metrics `produce-availability-avg` and `consume-availability-avg` demonstrate
+whether messages can be properly produced to the source cluster and consumed
+from the destination cluster. See config/multi-cluster-monitor.properties for
+the full jmx path for these metrics.
 
 ```
 $ ./bin/kafka-monitor-start.sh config/multi-cluster-monitor.properties
@@ -104,9 +113,11 @@ Open ```localhost:8000/index.html``` in your web browser
 
 You can edit webapp/index.html to easily add new metrics to be displayed.
 
-### Query metric value (e.g. service availability) via HTTP request
+### Query metric value (e.g. produce availability and consume availability) via HTTP request
 ```
 curl localhost:8778/jolokia/read/kmf.services:type=produce-service,name=*/produce-availability-avg
+
+curl localhost:8778/jolokia/read/kmf.services:type=consume-service,name=*/consume-availability-avg
 ```
 
 You can query other JMX metric value as well by substituting object-name and
