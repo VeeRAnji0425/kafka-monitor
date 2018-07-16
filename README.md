@@ -147,6 +147,12 @@ fpm -s dir -t deb -a all -n "kafka-monitor" -v 0.1 \
 --after-remove debian/postrm.sh \
 opt etc
 ```
+- Upload to PD Artifactory using the UI. 
+  - Select the `pd-debs` repository
+  - Click `Deploy` in the top right corner
+  - Select the `.deb` you just created
+  - Distribution: `trusty;xenial`, Component: `pd`, Architecture: `all`
+  - Hit the `Deploy` button
 
 ## Wiki
 
