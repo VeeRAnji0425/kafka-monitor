@@ -39,6 +39,10 @@ import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.MetricsReporter;
 import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.metrics.stats.Avg;
+import org.apache.kafka.common.metrics.stats.Max;
+import org.apache.kafka.common.metrics.stats.Percentile;
+import org.apache.kafka.common.metrics.stats.Percentiles;
 import org.apache.kafka.common.metrics.stats.Rate;
 import org.apache.kafka.common.metrics.stats.Total;
 import org.apache.kafka.common.utils.SystemTime;
@@ -75,6 +79,8 @@ public class ProduceService implements Service {
   private final int _threadsNum;
   private final String _zkConnect;
   private final boolean _treatZeroThroughputAsUnavailable;
+  private final int _latencyPercentileMaxMs;
+  private final int _latencyPercentileGranularityMs;
 
   public ProduceService(Map<String, Object> props, String name) throws Exception {
     _name = name;
@@ -82,7 +88,8 @@ public class ProduceService implements Service {
     _zkConnect = config.getString(ProduceServiceConfig.ZOOKEEPER_CONNECT_CONFIG);
     _brokerList = config.getString(ProduceServiceConfig.BOOTSTRAP_SERVERS_CONFIG);
     String producerClass = config.getString(ProduceServiceConfig.PRODUCER_CLASS_CONFIG);
-
+    _latencyPercentileMaxMs = config.getInt(ProduceServiceConfig.LATENCY_PERCENTILE_MAX_MS_CONFIG);
+    _latencyPercentileGranularityMs = config.getInt(ProduceServiceConfig.LATENCY_PERCENTILE_GRANULARITY_MS_CONFIG);
     _partitioner = config.getConfiguredInstance(ProduceServiceConfig.PARTITIONER_CLASS_CONFIG, KMPartitioner.class);
     _threadsNum = config.getInt(ProduceServiceConfig.PRODUCE_THREAD_NUM_CONFIG);
     _topic = config.getString(ProduceServiceConfig.TOPIC_CONFIG);
@@ -131,7 +138,7 @@ public class ProduceService implements Service {
     producerProps.put(ProducerConfig.ACKS_CONFIG, "-1");
     producerProps.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "20000");
     producerProps.put(ProducerConfig.RETRIES_CONFIG, "3");
-    producerProps.put(ProducerConfig.BLOCK_ON_BUFFER_FULL_CONFIG, "true");
+    producerProps.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, Long.MAX_VALUE);
     producerProps.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "1");
     producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
     producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
@@ -165,8 +172,8 @@ public class ProduceService implements Service {
         _sensors.addPartitionSensors(partition);
       }
       _produceExecutor.scheduleWithFixedDelay(new ProduceRunnable(partition, key), _produceDelayMs, _produceDelayMs, TimeUnit.MILLISECONDS);
-      _partitionNum.set(partitionNum);
     }
+    _partitionNum.set(partitionNum);
   }
 
   private Map<Integer, String> generateKeyMappings(int partitionNum) {
@@ -215,11 +222,12 @@ public class ProduceService implements Service {
     public final Metrics metrics;
     private final Sensor _recordsProduced;
     private final Sensor _produceError;
+    private final Sensor _produceDelay;
     private final ConcurrentMap<Integer, Sensor> _recordsProducedPerPartition;
     private final ConcurrentMap<Integer, Sensor> _produceErrorPerPartition;
     private final Map<String, String> _tags;
 
-    public ProduceMetrics(Metrics metrics, final Map<String, String> tags) {
+    public ProduceMetrics(final Metrics metrics, final Map<String, String> tags) {
       this.metrics = metrics;
       this._tags = tags;
 
@@ -234,6 +242,17 @@ public class ProduceService implements Service {
       _produceError.add(new MetricName("produce-error-rate", METRIC_GROUP_NAME, "The average number of errors per second", tags), new Rate());
       _produceError.add(new MetricName("produce-error-total", METRIC_GROUP_NAME, "The total number of errors", tags), new Total());
 
+      _produceDelay = metrics.sensor("produce-delay");
+      _produceDelay.add(new MetricName("produce-delay-ms-avg", METRIC_GROUP_NAME, "The average delay in ms for produce request", tags), new Avg());
+      _produceDelay.add(new MetricName("produce-delay-ms-max", METRIC_GROUP_NAME, "The maximum delay in ms for produce request", tags), new Max());
+
+      // There are 2 extra buckets use for values smaller than 0.0 or larger than max, respectively.
+      int bucketNum = _latencyPercentileMaxMs / _latencyPercentileGranularityMs + 2;
+      int sizeInBytes = 4 * bucketNum;
+      _produceDelay.add(new Percentiles(sizeInBytes, _latencyPercentileMaxMs, Percentiles.BucketSizing.CONSTANT,
+          new Percentile(new MetricName("produce-delay-ms-99th", METRIC_GROUP_NAME, "The 99th percentile delay in ms for produce request", tags), 99.0),
+          new Percentile(new MetricName("produce-delay-ms-999th", METRIC_GROUP_NAME, "The 999th percentile delay in ms for produce request", tags), 99.9)));
+
       metrics.addMetric(new MetricName("produce-availability-avg", METRIC_GROUP_NAME, "The average produce availability", tags),
         new Measurable() {
           @Override
@@ -241,8 +260,8 @@ public class ProduceService implements Service {
             double availabilitySum = 0.0;
             int partitionNum = _partitionNum.get();
             for (int partition = 0; partition < partitionNum; partition++) {
-              double recordsProduced = _sensors.metrics.metrics().get(new MetricName("records-produced-rate-partition-" + partition, METRIC_GROUP_NAME, tags)).value();
-              double produceError = _sensors.metrics.metrics().get(new MetricName("produce-error-rate-partition-" + partition, METRIC_GROUP_NAME, tags)).value();
+              double recordsProduced = metrics.metrics().get(metrics.metricName("records-produced-rate-partition-" + partition, METRIC_GROUP_NAME, tags)).value();
+              double produceError = metrics.metrics().get(metrics.metricName("produce-error-rate-partition-" + partition, METRIC_GROUP_NAME, tags)).value();
               // If there is no error, error rate sensor may expire and the value may be NaN. Treat NaN as 0 for error rate.
               if (Double.isNaN(produceError) || Double.isInfinite(produceError)) {
                 produceError = 0;
@@ -295,9 +314,11 @@ public class ProduceService implements Service {
     public void run() {
       try {
         long nextIndex = _nextIndexPerPartition.get(_partition).get();
-        String message = Utils.jsonFromFields(_topic, nextIndex, System.currentTimeMillis(), _producerId, _recordSize);
+        long currMs = System.currentTimeMillis();
+        String message = Utils.jsonFromFields(_topic, nextIndex, currMs, _producerId, _recordSize);
         BaseProducerRecord record = new BaseProducerRecord(_topic, _partition, _key, message);
         RecordMetadata metadata = _producer.send(record, _sync);
+        _sensors._produceDelay.record(System.currentTimeMillis() - currMs);
         _sensors._recordsProduced.record();
         _sensors._recordsProducedPerPartition.get(_partition).record();
         if (nextIndex == -1 && _sync) {
